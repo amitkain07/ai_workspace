@@ -1,9 +1,9 @@
 import { Module } from '@nestjs/common';
-import { OrganizationsService } from './org.service.js';
-import { OrganizationsController } from './org.controller.js';
-import { PrismaModule } from 'database/prisma/prisma.moudle.js';
-import { OrgMemberGuard } from '../common/guards/org-member.guard.js';
-import { RolesGuard } from '../common/guards/roles.guard.js';
+import { OrganizationsService } from './org.service';
+import { OrganizationsController } from './org.controller';
+import { PrismaModule } from 'database/prisma/prisma.moudle';
+import { OrgMemberGuard } from './org.member.gurad';
+import { RolesGuard } from 'src/common/gurads/role.gurad';
 
 @Module({
   imports: [PrismaModule],

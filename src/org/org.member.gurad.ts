@@ -8,9 +8,9 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { PrismaService } from '../../prisma/prisma.service';
-import { ORG_ROLES_KEY } from '../decorators/roles.decorator';
-import { GlobalRole, OrgRole, hasMinOrgRole } from '../enums/roles.enum';
+import { PrismaService } from 'database/prisma/prisma.service';
+import { ORG_ROLES_KEY } from 'src/common/decorators/role.decorator';
+import { OrgRole ,GlobalRole,hasMinOrgRole} from 'src/common/enum/roles.enum';
 
 @Injectable()
 export class OrgMemberGuard implements CanActivate {

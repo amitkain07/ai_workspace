@@ -1,12 +1,12 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { AppController } from './app.controller.js';
-import { AppService } from './app.service.js';
-import { DatabaseMongooseModule } from 'database/mongoose/mongoose.module.js';
-import { PrismaModule } from 'database/prisma/prisma.moudle.js';
-import { AuthModule } from './auth/auth.module.js';
-import { OrgModule } from './org/org.module.js';
-import { WorkspacesModule } from './workspace/workspace.module.js';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+import { DatabaseMongooseModule } from 'database/mongoose/mongoose.module';
+import { PrismaModule } from 'database/prisma/prisma.moudle';
+import { AuthModule } from './auth/auth.module';
+import { OrgModule } from './org/org.module';
+import { WorkspacesModule } from './workspace/workspace.module';
 
 @Module({
   imports: [
