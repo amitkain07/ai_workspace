@@ -9,9 +9,88 @@ datasource db {
 }
 
 model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
-  password  String
-  role      String   @default("MEMBER")
-  createdAt DateTime @default(now())
+  id         String   @id @default(uuid())
+  email      String   @unique
+  password   String
+  role       String   @default("USER")
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now())
+
+  owned_orgs         Organization[]       @relation("OrgOwner")
+  org_memberships    OrganizationMember[] @relation("MemberUser")
+  invitations        OrganizationMember[] @relation("InvitedByUser")
+  ws_memberships     WorkspaceMember[]
+  created_workspaces Workspace[]          @relation("WorkspaceCreator")
+}
+
+model Organization {
+  id          String   @id @default(uuid())
+  name        String
+  slug        String   @unique
+  owner_id    String
+  plan        String   @default("FREE")
+  token_quota Int      @default(100000)
+  is_active   Boolean  @default(true)
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  owner      User                 @relation("OrgOwner", fields: [owner_id], references: [id])
+  members    OrganizationMember[]
+  workspaces Workspace[]
+  usages     Usage[]
+}
+
+model OrganizationMember {
+  org_id     String
+  user_id    String
+  role       String   @default("MEMBER")
+  invited_by String?
+  joined_at  DateTime @default(now())
+
+  org     Organization @relation(fields: [org_id], references: [id], onDelete: Cascade)
+  user    User         @relation("MemberUser", fields: [user_id], references: [id], onDelete: Cascade)
+  inviter User?        @relation("InvitedByUser", fields: [invited_by], references: [id])
+
+  @@unique([org_id, user_id])
+}
+
+model Workspace {
+  id            String   @id @default(uuid())
+  org_id        String
+  name          String
+  slug          String
+  system_prompt String?
+  created_by    String
+  is_active     Boolean  @default(true)
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  org     Organization    @relation(fields: [org_id], references: [id], onDelete: Cascade)
+  creator User            @relation("WorkspaceCreator", fields: [created_by], references: [id])
+  members WorkspaceMember[]
+
+  @@unique([org_id, slug])
+}
+
+model WorkspaceMember {
+  workspace_id String
+  user_id      String
+  role         String   @default("MEMBER")
+  added_at     DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspace_id], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([workspace_id, user_id])
+}
+
+model Usage {
+  id            String   @id @default(uuid())
+  org_id        String
+  tokens_input  Int      @default(0)
+  tokens_output Int      @default(0)
+  cost_usd      Decimal  @default(0) @db.Decimal(12, 6)
+  created_at    DateTime @default(now())
+
+  org Organization @relation(fields: [org_id], references: [id], onDelete: Cascade)
 }
