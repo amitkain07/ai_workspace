@@ -12,6 +12,7 @@ model User {
   id         String   @id @default(uuid())
   email      String   @unique
   password   String
+  name       String
   role       String   @default("USER")
   is_active  Boolean  @default(true)
   created_at DateTime @default(now())
@@ -21,6 +22,7 @@ model User {
   invitations        OrganizationMember[] @relation("InvitedByUser")
   ws_memberships     WorkspaceMember[]
   created_workspaces Workspace[]          @relation("WorkspaceCreator")
+  sent_invites       InviteToken[]        @relation("SentInvites")
 }
 
 model Organization {
@@ -34,10 +36,11 @@ model Organization {
   created_at  DateTime @default(now())
   updated_at  DateTime @updatedAt
 
-  owner      User                 @relation("OrgOwner", fields: [owner_id], references: [id])
-  members    OrganizationMember[]
-  workspaces Workspace[]
-  usages     Usage[]
+  owner         User                 @relation("OrgOwner", fields: [owner_id], references: [id])
+  members       OrganizationMember[]
+  workspaces    Workspace[]
+  usages        Usage[]
+  invite_tokens InviteToken[]
 }
 
 model OrganizationMember {
@@ -52,6 +55,21 @@ model OrganizationMember {
   inviter User?        @relation("InvitedByUser", fields: [invited_by], references: [id])
 
   @@unique([org_id, user_id])
+}
+
+model InviteToken {
+  id          String    @id @default(uuid())
+  email       String
+  role        String
+  token       String    @unique
+  invited_by  String
+  org_id      String
+  expires_at  DateTime
+  accepted_at DateTime?
+  created_at  DateTime  @default(now())
+
+  inviter User         @relation("SentInvites", fields: [invited_by], references: [id])
+  org     Organization @relation(fields: [org_id], references: [id], onDelete: Cascade)
 }
 
 model Workspace {

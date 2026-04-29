@@ -1,5 +1,3 @@
-
-
 import {
   BadRequestException,
   ConflictException,
@@ -8,10 +6,12 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { createHash, randomBytes } from 'crypto';
 import { PrismaService } from 'database/prisma/prisma.service';
 import { CreateOrgDto, UpdateOrgDto, InviteMemberDto, UpdateMemberRoleDto } from './org.dto';
 import { GlobalRole, OrgRole } from 'src/common/enum/roles.enum';
 
+const INVITE_EXPIRY_HOURS = 72;
 
 @Injectable()
 export class OrganizationsService {
@@ -19,16 +19,11 @@ export class OrganizationsService {
 
   constructor(private prisma: PrismaService) {}
 
-  // ── Create Org ───────────────────────────────────────────────
-
   async create(ownerId: string, dto: CreateOrgDto) {
-    // Check slug uniqueness
     const existing = await this.prisma.organization.findUnique({
       where: { slug: dto.slug },
     });
-    if (existing) {
-      throw new ConflictException(`Slug "${dto.slug}" is already taken`);
-    }
+    if (existing) throw new ConflictException(`Slug "${dto.slug}" is already taken`);
 
     const org = await this.prisma.organization.create({
       data: {
@@ -40,31 +35,22 @@ export class OrganizationsService {
       },
     });
 
-    // Auto-enroll owner as ORG_ADMIN
     await this.prisma.organizationMember.create({
-      data: {
-        org_id: org.id,
-        user_id: ownerId,
-        role: OrgRole.ORG_ADMIN,
-      },
+      data: { org_id: org.id, user_id: ownerId, role: OrgRole.ORG_ADMIN },
     });
 
     this.logger.log(`Org created: ${org.id} by user ${ownerId}`);
-    return org;
+    return { ...org, my_role: OrgRole.ORG_ADMIN };
   }
-
-  // ── List orgs (SUPERADMIN sees all; user sees own) ───────────
 
   async findAll(callerId: string, callerRole: string) {
     if (callerRole === GlobalRole.SUPERADMIN) {
       return this.prisma.organization.findMany({
-        where: {}, // middleware adds is_active:true
         include: { _count: { select: { members: true, workspaces: true } } },
         orderBy: { created_at: 'desc' },
       });
     }
 
-    // Regular user — return only orgs they belong to
     const memberships = await this.prisma.organizationMember.findMany({
       where: { user_id: callerId },
       include: {
@@ -76,8 +62,6 @@ export class OrganizationsService {
 
     return memberships.map((m) => ({ ...m.org, my_role: m.role }));
   }
-
-  // ── Get single org ───────────────────────────────────────────
 
   async findOne(orgId: string) {
     const org = await this.prisma.organization.findUnique({
@@ -91,10 +75,8 @@ export class OrganizationsService {
     return org;
   }
 
-  // ── Update org ───────────────────────────────────────────────
-
   async update(orgId: string, dto: UpdateOrgDto) {
-    await this.findOne(orgId); // 404 check
+    await this.findOne(orgId);
 
     if (dto.slug) {
       const conflict = await this.prisma.organization.findFirst({
@@ -103,95 +85,83 @@ export class OrganizationsService {
       if (conflict) throw new ConflictException('Slug already taken');
     }
 
-    return this.prisma.organization.update({
-      where: { id: orgId },
-      data: dto,
-    });
+    return this.prisma.organization.update({ where: { id: orgId }, data: dto });
   }
 
-  // ── Suspend / Activate org (SUPERADMIN) ──────────────────────
-
   async suspend(orgId: string) {
-    return this.prisma.organization.update({
-      where: { id: orgId },
-      data: { is_active: false },
-    });
+    return this.prisma.organization.update({ where: { id: orgId }, data: { is_active: false } });
   }
 
   async activate(orgId: string) {
-    return this.prisma.organization.update({
-      where: { id: orgId },
-      data: { is_active: true },
-    });
+    return this.prisma.organization.update({ where: { id: orgId }, data: { is_active: true } });
   }
-
-  // ── Members ──────────────────────────────────────────────────
 
   async getMembers(orgId: string) {
     return this.prisma.organizationMember.findMany({
       where: { org_id: orgId },
-      include: {
-        user: { select: { id: true, email: true, is_active: true } },
-      },
+      include: { user: { select: { id: true, email: true, is_active: true } } },
       orderBy: { joined_at: 'asc' },
     });
   }
 
   async inviteMember(orgId: string, inviterId: string, dto: InviteMemberDto) {
-    // Find user by email
-    const user = await this.prisma.user.findUnique({
-      where: { email: dto.email.toLowerCase() },
+    const email = dto.email.toLowerCase();
+
+    const existingUser = await this.prisma.user.findUnique({ where: { email } });
+
+    if (existingUser) {
+      // Block adding SUPERADMIN to an org
+      if (existingUser.role === GlobalRole.SUPERADMIN) {
+        throw new ForbiddenException('Cannot add a SUPERADMIN to an org');
+      }
+
+      const alreadyMember = await this.prisma.organizationMember.findUnique({
+        where: { org_id_user_id: { org_id: orgId, user_id: existingUser.id } },
+      });
+      if (alreadyMember) throw new ConflictException('User is already a member of this org');
+
+      const member = await this.prisma.organizationMember.create({
+        data: { org_id: orgId, user_id: existingUser.id, role: dto.role, invited_by: inviterId },
+        include: { user: { select: { id: true, email: true } } },
+      });
+
+      this.logger.log(`User ${existingUser.id} added to org ${orgId} as ${dto.role}`);
+      return { type: 'added', member };
+    }
+
+    // User doesn't exist — create invite token
+    const pendingInvite = await this.prisma.inviteToken.findFirst({
+      where: { email, org_id: orgId, accepted_at: null, expires_at: { gt: new Date() } },
     });
-    if (!user) {
-      throw new NotFoundException(`No user found with email ${dto.email}`);
-    }
+    if (pendingInvite) throw new ConflictException('A pending invite already exists for this email');
 
-    // Block adding SUPERADMIN to an org
-    if (user.role === GlobalRole.SUPERADMIN) {
-      throw new ForbiddenException('Cannot add a SUPERADMIN to an org');
-    }
+    const rawToken    = randomBytes(32).toString('hex');
+    const hashedToken = createHash('sha256').update(rawToken).digest('hex');
+    const expiresAt   = new Date();
+    expiresAt.setHours(expiresAt.getHours() + INVITE_EXPIRY_HOURS);
 
-    // Check already a member
-    const existing = await this.prisma.organizationMember.findUnique({
-      where: { org_id_user_id: { org_id: orgId, user_id: user.id } },
-    });
-    if (existing) {
-      throw new ConflictException('User is already a member of this org');
-    }
-
-    const member = await this.prisma.organizationMember.create({
+    await this.prisma.inviteToken.create({
       data: {
-        org_id: orgId,
-        user_id: user.id,
+        email,
         role: dto.role,
+        token: hashedToken,
         invited_by: inviterId,
+        org_id: orgId,
+        expires_at: expiresAt,
       },
-      include: { user: { select: { id: true, email: true } } },
     });
 
-    this.logger.log(
-      `User ${user.id} invited to org ${orgId} as ${dto.role} by ${inviterId}`,
-    );
-
-    // TODO: Emit org.member.invited event → Notification queue
-    return member;
+    this.logger.log(`Invite token created for ${email} → org ${orgId} as ${dto.role}`);
+    return { type: 'invited', email, role: dto.role, token: rawToken };
   }
 
-  async updateMemberRole(
-    orgId: string,
-    targetUserId: string,
-    callerId: string,
-    dto: UpdateMemberRoleDto,
-  ) {
-    // Prevent self-demotion from ORG_ADMIN (last admin guard)
+  async updateMemberRole(orgId: string, targetUserId: string, callerId: string, dto: UpdateMemberRoleDto) {
     if (targetUserId === callerId && dto.role !== OrgRole.ORG_ADMIN) {
       const adminCount = await this.prisma.organizationMember.count({
         where: { org_id: orgId, role: OrgRole.ORG_ADMIN },
       });
       if (adminCount <= 1) {
-        throw new BadRequestException(
-          'Cannot remove the last ORG_ADMIN from the organisation',
-        );
+        throw new BadRequestException('Cannot remove the last ORG_ADMIN from the organisation');
       }
     }
 
@@ -209,12 +179,10 @@ export class OrganizationsService {
   async removeMember(orgId: string, targetUserId: string, callerId: string) {
     const org = await this.findOne(orgId);
 
-    // Prevent removing the org owner
     if (org.owner_id === targetUserId) {
       throw new ForbiddenException('Cannot remove the organisation owner');
     }
 
-    // Last admin guard
     if (targetUserId === callerId) {
       const adminCount = await this.prisma.organizationMember.count({
         where: { org_id: orgId, role: OrgRole.ORG_ADMIN },
@@ -223,9 +191,7 @@ export class OrganizationsService {
         where: { org_id_user_id: { org_id: orgId, user_id: targetUserId } },
       });
       if (member?.role === OrgRole.ORG_ADMIN && adminCount <= 1) {
-        throw new BadRequestException(
-          'Cannot remove the last ORG_ADMIN from the organisation',
-        );
+        throw new BadRequestException('Cannot remove the last ORG_ADMIN from the organisation');
       }
     }
 
@@ -237,27 +203,17 @@ export class OrganizationsService {
     return { message: 'Member removed successfully' };
   }
 
-  // ── Transfer ownership ───────────────────────────────────────
-
-  async transferOwnership(
-    orgId: string,
-    newOwnerId: string,
-    callerId: string,
-  ) {
+  async transferOwnership(orgId: string, newOwnerId: string, callerId: string) {
     const org = await this.findOne(orgId);
     if (org.owner_id !== callerId) {
       throw new ForbiddenException('Only the current owner can transfer ownership');
     }
 
-    // New owner must be an existing member
     const membership = await this.prisma.organizationMember.findUnique({
       where: { org_id_user_id: { org_id: orgId, user_id: newOwnerId } },
     });
-    if (!membership) {
-      throw new BadRequestException('New owner must already be a member');
-    }
+    if (!membership) throw new BadRequestException('New owner must already be a member');
 
-    // Upgrade new owner to ORG_ADMIN if not already
     await this.prisma.organizationMember.update({
       where: { org_id_user_id: { org_id: orgId, user_id: newOwnerId } },
       data: { role: OrgRole.ORG_ADMIN },
@@ -268,8 +224,6 @@ export class OrganizationsService {
       data: { owner_id: newOwnerId },
     });
   }
-
-  // ── Usage snapshot ───────────────────────────────────────────
 
   async getUsageSummary(orgId: string) {
     const org = await this.findOne(orgId);
@@ -284,8 +238,7 @@ export class OrganizationsService {
       _count: { id: true },
     });
 
-    const totalTokens =
-      (totals._sum.tokens_input ?? 0) + (totals._sum.tokens_output ?? 0);
+    const totalTokens = (totals._sum.tokens_input ?? 0) + (totals._sum.tokens_output ?? 0);
 
     return {
       org_id: orgId,
