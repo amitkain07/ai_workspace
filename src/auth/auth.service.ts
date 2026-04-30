@@ -19,6 +19,7 @@ import { SignupDto } from './signup.dto';
 import { BulkInviteDto, AcceptInviteDto } from './auth.dto';
 import type { JwtRefreshPayload } from './jwt-refresh.stategy';
 import { GlobalRole, OrgRole } from 'src/common/enum/roles.enum';
+import { EmailService } from 'src/common/email/email.service';
 
 const ACCESS_TOKEN_COOKIE  = 'access_token';
 const REFRESH_TOKEN_COOKIE = 'refresh_token';
@@ -34,9 +35,10 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly emailService: EmailService,
   ) {}
 
- async signup(dto: SignupDto, res: Response) {
+  async signup(dto: SignupDto, res: Response) {
     const existing = await this.prisma.user.findUnique({
       where: { email: dto.email.toLowerCase() },
     });
@@ -55,7 +57,7 @@ export class AuthService {
         name: dto.name,
         role: GlobalRole.SUPERADMIN,
       },
-      select: { id: true, email: true, role: true },
+      select: { id: true, email: true, role: true, name: true },
     });
 
     let orgResult: { id: string; name: string; slug: string } | null = null;
@@ -84,7 +86,13 @@ export class AuthService {
       orgResult = { id: org.id, name: org.name, slug: org.slug };
 
       if (dto.members?.length) {
-        inviteResults = await this.createBulkInviteTokens(org.id, user.id, dto.members);
+        inviteResults = await this.createBulkInviteTokens(
+          org.id,
+          user.id,
+          user.name,
+          org.name,
+          dto.members,
+        );
       }
     }
 
@@ -111,14 +119,27 @@ export class AuthService {
       where: { org_id_user_id: { org_id: dto.org_id, user_id: callerId } },
     });
 
-    if (!membership) {
-      throw new ForbiddenException('You are not a member of this organisation');
-    }
-    if (membership.role !== OrgRole.ORG_ADMIN) {
-      throw new ForbiddenException('Only ORG_ADMIN can invite members');
-    }
+    if (!membership) throw new ForbiddenException('You are not a member of this organisation');
+    if (membership.role !== OrgRole.ORG_ADMIN) throw new ForbiddenException('Only ORG_ADMIN can invite members');
 
-    const results = await this.createBulkInviteTokens(dto.org_id, callerId, dto.members);
+    const caller = await this.prisma.user.findUnique({
+      where: { id: callerId },
+      select: { name: true },
+    });
+
+    const org = await this.prisma.organization.findUnique({
+      where: { id: dto.org_id },
+      select: { name: true },
+    });
+
+    const results = await this.createBulkInviteTokens(
+      dto.org_id,
+      callerId,
+      caller?.name ?? 'Someone',
+      org?.name ?? 'the organisation',
+      dto.members,
+    );
+
     return { invites: results };
   }
 
@@ -229,6 +250,8 @@ export class AuthService {
   private async createBulkInviteTokens(
     orgId: string,
     inviterId: string,
+    inviterName: string,
+    orgName: string,
     members: { email: string; role: OrgRole }[],
   ) {
     const results: {
@@ -271,6 +294,14 @@ export class AuthService {
             org_id: orgId,
             expires_at: expiresAt,
           },
+        });
+
+        await this.emailService.sendInvite({
+          to: email,
+          inviterName,
+          orgName,
+          role: member.role,
+          token: rawToken,
         });
 
         results.push({ email, role: member.role, status: 'invited', token: rawToken });
