@@ -1,48 +1,71 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import * as nodemailer from 'nodemailer';
+import { Resend } from 'resend';
+
+interface SendInvitePayload {
+  to: string;
+  inviterName: string;
+  orgName: string;
+  role: string;
+  token: string;
+}
 
 @Injectable()
 export class EmailService {
   private readonly logger = new Logger(EmailService.name);
-  private transporter: nodemailer.Transporter;
-  
-constructor(private readonly config: ConfigService) {
-  nodemailer.createTestAccount().then((account) => {
-    this.transporter = nodemailer.createTransport({
-      host: 'smtp.ethereal.email',
-      port: 587,
-      secure: false,
-      auth: {
-        user: account.user,
-        pass: account.pass,
-      },
-    });
-    this.logger.log(`Ethereal test account: ${account.user}`);
-    this.logger.log(`View emails at: https://ethereal.email`);
-  });
-}
+  private readonly resend: Resend;
+  private readonly isProd: boolean;
 
-  async sendInvite({
-    to,
-    inviterName,
-    orgName,
-    role,
-    token,
-  }: {
-    to: string;
-    inviterName: string;
-    orgName: string;
-    role: string;
-    token: string;
-  }) {
-    const acceptUrl = `${this.config.get('FRONTEND_URL') ?? 'http://localhost:3000'}/accept-invite?token=${token}`;
+  constructor(private readonly config: ConfigService) {
+    this.resend = new Resend(this.config.getOrThrow<string>('RESEND_API_KEY'));
+    this.isProd = this.config.get<string>('NODE_ENV') === 'production';
+  }
 
-    const html = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2>You've been invited!</h2>
-        <p><strong>${inviterName}</strong> has invited you to join <strong>${orgName}</strong> as <strong>${role}</strong>.</p>
-        <p>Click the button below to accept your invite and set up your account.</p>
+  async sendInvite(payload: SendInvitePayload) {
+    const acceptUrl = `${this.config.get('FRONTEND_URL') ?? 'http://localhost:3000'}/accept-invite?token=${payload.token}`;
+    const html = this.buildInviteHtml(payload.inviterName, payload.orgName, payload.role, acceptUrl);
+
+    const actualTo = this.isProd
+      ? payload.to
+      : (this.config.get<string>('MAIL_DEV_OVERRIDE') ?? payload.to);
+
+    if (!this.isProd) {
+      this.logger.log(`[DEV] Email intended for ${payload.to} → redirected to ${actualTo}`);
+    }
+
+    try {
+      const { data, error } = await this.resend.emails.send({
+        from: this.config.getOrThrow<string>('MAIL_FROM'),
+        to: actualTo,
+        subject: `You're invited to join ${payload.orgName}`,
+        html,
+      });
+
+      if (error) {
+        this.logger.error(`Failed to send invite to ${payload.to}: ${JSON.stringify(error)}`);
+        return;
+      }
+
+      this.logger.log(`Invite sent to ${payload.to} — Resend id: ${data?.id}`);
+    } catch (err) {
+      this.logger.error(`Failed to send invite to ${payload.to}: ${err}`);
+    }
+  }
+
+  private buildInviteHtml(
+    inviterName: string,
+    orgName: string,
+    role: string,
+    acceptUrl: string,
+  ): string {
+    return `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
+        <h2 style="color: #0A0D14;">You've been invited!</h2>
+        <p style="color: #374151;">
+          <strong>${inviterName}</strong> has invited you to join
+          <strong>${orgName}</strong> as <strong>${role}</strong>.
+        </p>
+        <p style="color: #374151;">Click the button below to accept your invite and set up your account.</p>
         <a href="${acceptUrl}"
           style="
             display: inline-block;
@@ -52,29 +75,19 @@ constructor(private readonly config: ConfigService) {
             text-decoration: none;
             border-radius: 6px;
             margin: 16px 0;
+            font-weight: 600;
           "
         >
           Accept Invite
         </a>
         <p style="color: #6B7280; font-size: 14px;">This invite expires in 72 hours.</p>
-        <p style="color: #6B7280; font-size: 14px;">If you did not expect this invite, you can ignore this email.</p>
+        <p style="color: #6B7280; font-size: 14px;">If you did not expect this invite, you can safely ignore this email.</p>
         <hr style="border: none; border-top: 1px solid #E5E7EB; margin: 24px 0;" />
         <p style="color: #9CA3AF; font-size: 12px;">
-          Or copy this link: <a href="${acceptUrl}">${acceptUrl}</a>
+          Or copy this link:<br/>
+          <a href="${acceptUrl}" style="color: #6B7280;">${acceptUrl}</a>
         </p>
       </div>
     `;
-
-    try {
-      await this.transporter.sendMail({
-        from: `"SynthCore" <${this.config.getOrThrow('MAIL_FROM')}>`,
-        to,
-        subject: `You're invited to join ${orgName}`,
-        html,
-      });
-      this.logger.log(`Invite email sent to ${to}`);
-    } catch (err) {
-      this.logger.error(`Failed to send invite email to ${to}: ${err}`);
-    }
   }
 }
