@@ -28,8 +28,16 @@ export class OrgMemberGuard implements CanActivate {
 
     const orgId = req.params?.orgId;
     if (!orgId) {
-      throw new ForbiddenException('No orgId in route params');
+      throw new ForbiddenException('Access denied');
     }
+
+    // Check if org is active (suspended orgs block all access)
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { is_active: true },
+    });
+    if (!org) throw new NotFoundException('Organisation not found');
+    if (!org.is_active) throw new ForbiddenException('Organisation is suspended');
 
     // Resolve required OrgRole from metadata (default: any member)
     const requiredRoles = this.reflector.getAllAndOverride<OrgRole[]>(
@@ -42,7 +50,7 @@ export class OrgMemberGuard implements CanActivate {
     });
 
     if (!membership) {
-      throw new NotFoundException('You are not a member of this organisation');
+      throw new ForbiddenException('Access denied');
     }
 
     if (requiredRoles && requiredRoles.length > 0) {
@@ -50,9 +58,7 @@ export class OrgMemberGuard implements CanActivate {
         hasMinOrgRole(membership.role as OrgRole, r),
       );
       if (!meetsRole) {
-        throw new ForbiddenException(
-          `Requires one of [${requiredRoles.join(', ')}]. Your role: ${membership.role}`,
-        );
+        throw new ForbiddenException('Insufficient permissions');
       }
     }
 

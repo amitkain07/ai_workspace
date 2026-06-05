@@ -55,9 +55,9 @@ export class AuthService {
         email: dto.email.toLowerCase(),
         password: hashedPassword,
         name: dto.name,
-        role: GlobalRole.SUPERADMIN,
+        role: GlobalRole.USER,
       },
-      select: { id: true, email: true, role: true, name: true },
+      select: { id: true, email: true, role: true, name: true, is_active: true },
     });
 
     let orgResult: { id: string; name: string; slug: string } | null = null;
@@ -202,10 +202,11 @@ export class AuthService {
   async login(dto: LoginDto, res: Response, userAgent: string, ip: string) {
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email.toLowerCase() },
-      select: { id: true, email: true, role: true, password: true },
+      select: { id: true, email: true, role: true, password: true, is_active: true },
     });
 
     if (!user) throw new UnauthorizedException('Invalid credentials');
+    if (!user.is_active) throw new ForbiddenException('Account is deactivated');
 
     const passwordMatch = await bcrypt.compare(dto.password, user.password);
     if (!passwordMatch) throw new UnauthorizedException('Invalid credentials');
@@ -225,10 +226,11 @@ export class AuthService {
   async refresh(payload: JwtRefreshPayload & { rawRefreshToken: string }, res: Response) {
     const user = await this.prisma.user.findUnique({
       where: { id: payload.sub },
-      select: { id: true, email: true, role: true },
+      select: { id: true, email: true, role: true, is_active: true },
     });
 
     if (!user) throw new UnauthorizedException('Session invalid or expired');
+    if (!user.is_active) throw new ForbiddenException('Account is deactivated');
 
     const newRefreshTokenId = randomUUID();
 
@@ -304,7 +306,7 @@ export class AuthService {
           token: rawToken,
         });
 
-        results.push({ email, role: member.role, status: 'invited', token: rawToken });
+        results.push({ email, role: member.role, status: 'invited' });
         this.logger.log(`Invite created for ${email} → org ${orgId} as ${member.role}`);
       } catch (err) {
         results.push({ email: member.email, role: member.role, status: 'failed', reason: 'Internal error' });

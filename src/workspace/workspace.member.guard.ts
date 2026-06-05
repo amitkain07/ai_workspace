@@ -26,7 +26,15 @@ export class WorkspaceMemberGuard implements CanActivate {
     if (user?.role === GlobalRole.SUPERADMIN) return true;
 
     const { orgId, workspaceId } = req.params ?? {};
-    if (!workspaceId) throw new ForbiddenException('No workspaceId in route');
+    if (!workspaceId) throw new ForbiddenException('Access denied');
+
+    // Check if org is active
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { is_active: true },
+    });
+    if (!org) throw new NotFoundException('Organisation not found');
+    if (!org.is_active) throw new ForbiddenException('Organisation is suspended');
 
     // 1. Verify workspace belongs to the org (isolation)
     const workspace = await this.prisma.workspace.findFirst({
@@ -58,7 +66,7 @@ export class WorkspaceMemberGuard implements CanActivate {
       },
     });
     if (!wsMembership) {
-      throw new ForbiddenException('You are not a member of this workspace');
+      throw new ForbiddenException('Access denied');
     }
 
     // 4. Check role requirement from @OrgRoles()
@@ -71,9 +79,7 @@ export class WorkspaceMemberGuard implements CanActivate {
         hasMinOrgRole(wsMembership.role as OrgRole, r),
       );
       if (!meetsRole) {
-        throw new ForbiddenException(
-          `Requires [${requiredRoles.join(', ')}]. Your role: ${wsMembership.role}`,
-        );
+        throw new ForbiddenException('Insufficient permissions');
       }
     }
 
